@@ -168,7 +168,7 @@ def field(
     if not isinstance(init, bool):
         raise TypeError("`init` must be a bool")
     if kw_only is not MISSING and not isinstance(kw_only, bool):
-        raise TypeError("`kw_only` must be a bool or MISSING")
+        raise TypeError("`kw_only` must be a bool")
     if default is not MISSING:
         default_factory = _make_default_factory(default)
     ret = Field(default_factory=default_factory, init=init, kw_only=kw_only)

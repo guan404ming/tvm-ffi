@@ -200,7 +200,7 @@ def _inspect_c_class_fields(
         if origin in [ClassVar, InitVar]:
             continue
         # Detect KW_ONLY sentinel
-        if resolved_type is _KW_ONLY_TYPE or isinstance(resolved_type, _KW_ONLY_TYPE):
+        if isinstance(resolved_type, _KW_ONLY_TYPE):
             if kw_only_start_idx is not None:
                 raise ValueError(f"KW_ONLY may only be used once per class: {type_cls}")
             kw_only_start_idx = field_count
