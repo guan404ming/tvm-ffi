@@ -34,14 +34,14 @@ from typing_extensions import dataclass_transform
 
 from ..core import TypeField, TypeInfo, _lookup_or_register_type_info_from_type_key, _set_type_cls
 from . import _utils
-from .field import field
+from .field import _KW_ONLY_TYPE, field
 
 _InputClsType = TypeVar("_InputClsType")
 
 
-@dataclass_transform(field_specifiers=(field,))
+@dataclass_transform(field_specifiers=(field,), kw_only_default=False)
 def c_class(
-    type_key: str, init: bool = True
+    type_key: str, init: bool = True, kw_only: bool = False
 ) -> Callable[[Type[_InputClsType]], Type[_InputClsType]]:  # noqa: UP006
     """(Experimental) Create a dataclass-like proxy for a C++ class registered with TVM FFI.
 
@@ -71,6 +71,12 @@ def c_class(
         signature.  The generated initializer calls the C++ ``__init__``
         function registered with ``ObjectDef`` and invokes ``__post_init__`` if
         it exists on the Python class.
+
+    kw_only
+        If ``True``, all fields become keyword-only parameters in the generated
+        ``__init__``. Individual fields can override this by setting
+        ``kw_only=False`` in :func:`field`. Additionally, a ``KW_ONLY`` sentinel
+        annotation can be used to mark all subsequent fields as keyword-only.
 
     Returns
     -------
@@ -115,6 +121,31 @@ def c_class(
         obj = MyClass(v_i64=4, v_i32=8)
         obj.v_f64 = 3.14  # transparently forwards to the underlying C++ object
 
+    Use ``kw_only=True`` to make all fields keyword-only:
+
+    .. code-block:: python
+
+        @c_class("example.MyClass", kw_only=True)
+        class MyClass:
+            x: int
+            y: int
+
+
+        obj = MyClass(x=1, y=2)  # all args must be keyword
+
+    Use ``KW_ONLY`` sentinel to make subsequent fields keyword-only:
+
+    .. code-block:: python
+
+        from tvm_ffi.dataclasses import KW_ONLY
+
+
+        @c_class("example.MyClass")
+        class MyClass:
+            x: int
+            _: KW_ONLY
+            y: int  # keyword-only
+
     """
 
     def decorator(super_type_cls: Type[_InputClsType]) -> Type[_InputClsType]:  # noqa: UP006
@@ -124,9 +155,15 @@ def c_class(
         type_info: TypeInfo = _lookup_or_register_type_info_from_type_key(type_key)
         assert type_info.parent_type_info is not None
         # Step 2. Reflect all the fields of the type
-        type_info.fields = _inspect_c_class_fields(super_type_cls, type_info)
-        for type_field in type_info.fields:
-            _utils.fill_dataclass_field(super_type_cls, type_field)
+        type_info.fields, kw_only_start_idx = _inspect_c_class_fields(super_type_cls, type_info)
+        for idx, type_field in enumerate(type_info.fields):
+            kw_only_from_sentinel = kw_only_start_idx is not None and idx >= kw_only_start_idx
+            _utils.fill_dataclass_field(
+                super_type_cls,
+                type_field,
+                class_kw_only=kw_only,
+                kw_only_from_sentinel=kw_only_from_sentinel,
+            )
         # Step 3. Create the proxy class with the fields as properties
         fn_init = _utils.method_init(super_type_cls, type_info) if init else None
         type_cls: Type[_InputClsType] = _utils.type_info_to_cls(  # noqa: UP006
@@ -140,20 +177,36 @@ def c_class(
     return decorator
 
 
-def _inspect_c_class_fields(type_cls: type, type_info: TypeInfo) -> list[TypeField]:
+def _inspect_c_class_fields(
+    type_cls: type, type_info: TypeInfo
+) -> tuple[list[TypeField], int | None]:
     if sys.version_info >= (3, 9):
         type_hints_resolved = get_type_hints(type_cls, include_extras=True)
     else:
         type_hints_resolved = get_type_hints(type_cls)
-    type_hints_py = {
-        name: type_hints_resolved[name]
-        for name in getattr(type_cls, "__annotations__", {}).keys()
-        if get_origin(type_hints_resolved[name])
-        not in [  # ignore non-field annotations
-            ClassVar,
-            InitVar,
-        ]
-    }
+
+    # Filter out ClassVar, InitVar, and detect KW_ONLY
+    annotations = getattr(type_cls, "__annotations__", {})
+    type_hints_py: dict[str, type] = {}
+    kw_only_start_idx: int | None = None
+    field_count = 0
+
+    for name in annotations.keys():
+        resolved_type = type_hints_resolved.get(name)
+        if resolved_type is None:
+            continue
+        origin = get_origin(resolved_type)
+        # Skip ClassVar and InitVar
+        if origin in [ClassVar, InitVar]:
+            continue
+        # Detect KW_ONLY sentinel
+        if resolved_type is _KW_ONLY_TYPE or isinstance(resolved_type, _KW_ONLY_TYPE):
+            if kw_only_start_idx is not None:
+                raise ValueError(f"KW_ONLY may only be used once per class: {type_cls}")
+            kw_only_start_idx = field_count
+            continue
+        type_hints_py[name] = resolved_type
+        field_count += 1
     del type_hints_resolved
 
     type_fields_cxx: dict[str, TypeField] = {f.name: f for f in type_info.fields}
@@ -172,4 +225,4 @@ def _inspect_c_class_fields(type_cls: type, type_info: TypeInfo) -> list[TypeFie
         raise ValueError(
             f"Missing fields in `{type_cls}`: {extra_fields}. Defined in C++ but not in Python"
         )
-    return type_fields
+    return type_fields, kw_only_start_idx
